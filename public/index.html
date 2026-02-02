@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Video Sprite Generator</title>
+    <title>Video to Sprite</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
     <style>.loader { transition: width 0.2s; }</style>
@@ -15,13 +15,13 @@
 
         <div class="space-y-4">
             <div>
-                <label class="block text-sm mb-1">Video URL (Direct MP4 link)</label>
+                <label class="block text-sm mb-1">Video URL (Direct .mp4 link)</label>
                 <input type="text" id="videoUrl" class="w-full p-2 rounded bg-gray-700 border border-gray-600 focus:border-blue-500 outline-none" placeholder="https://example.com/video.mp4">
             </div>
             
             <div class="grid grid-cols-2 gap-4">
                 <div>
-                    <label class="block text-sm mb-1">Thumbnail Width</label>
+                    <label class="block text-sm mb-1">Thumbnail Width (px)</label>
                     <input type="number" id="thumbWidth" value="160" class="w-full p-2 rounded bg-gray-700 border border-gray-600">
                 </div>
                 <div>
@@ -46,8 +46,15 @@
         </div>
 
         <div id="resultSection" class="hidden mt-6 p-4 bg-gray-700 rounded text-center">
-            <h3 class="text-xl font-bold text-green-400 mb-2">Success!</h3>
-            <img id="finalImage" class="max-w-full border-2 border-green-500 rounded mx-auto mb-4" />
+            <h3 class="text-xl font-bold text-green-400 mb-2">Sprite Generated!</h3>
+            
+            <a id="downloadLink" download="sprite.png" class="inline-block bg-green-600 hover:bg-green-500 text-white px-6 py-2 rounded mb-4 font-bold">
+                Download Image
+            </a>
+            
+            <div class="overflow-auto max-h-64 border border-gray-600 rounded">
+                <img id="finalImage" class="max-w-full mx-auto" />
+            </div>
         </div>
     </div>
 
@@ -69,12 +76,14 @@
         const videoUrl = document.getElementById('videoUrl').value;
         const width = parseInt(document.getElementById('thumbWidth').value);
         const interval = parseInt(document.getElementById('interval').value);
-        const height = Math.round(width * (9/16)); // Auto calc height
+        // Auto-calculate height assuming 16:9 ratio. You can change this if needed.
+        const height = Math.round(width * (9/16)); 
 
         if (!videoUrl) return alert("Please enter a URL");
 
         document.getElementById('statusSection').classList.remove('hidden');
         document.getElementById('generateBtn').disabled = true;
+        document.getElementById('resultSection').classList.add('hidden');
 
         try {
             if (!ffmpeg.isLoaded()) {
@@ -82,25 +91,29 @@
                 await ffmpeg.load();
             }
 
-            // 1. Download Video via our Proxy
+            // 1. Download Video via Cloudflare Proxy
             updateProgress("Downloading Video...", 20);
             const proxyRes = await fetch(`/api/proxy?url=${encodeURIComponent(videoUrl)}`);
-            if (!proxyRes.ok) throw new Error("Could not fetch video. Check URL.");
+            if (!proxyRes.ok) throw new Error("Could not fetch video. Link might be broken.");
             const videoData = await proxyRes.arrayBuffer();
             ffmpeg.FS('writeFile', 'input.mp4', new Uint8Array(videoData));
 
             // 2. Extract Frames
-            updateProgress("Extracting Frames (this takes time)...", 40);
-            // Limit to first 60 seconds for demo speed, remove '-t 60' for full video
+            updateProgress("Extracting Frames (Please wait)...", 40);
+            // Command to extract 1 frame every X seconds, resized to width
             await ffmpeg.run('-i', 'input.mp4', '-vf', `fps=1/${interval},scale=${width}:-1`, 'frame_%03d.png');
 
-            // 3. Stitch on Canvas
-            updateProgress("Stitching Images...", 80);
+            // 3. Stitch Images
+            updateProgress("Stitching Sprite...", 80);
             const files = ffmpeg.FS('readdir', '/').filter(f => f.startsWith('frame') && f.endsWith('.png'));
+            
+            if(files.length === 0) throw new Error("No frames could be extracted.");
+
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
-            const cols = 5;
+            const cols = 5; // Number of columns in the grid
             const rows = Math.ceil(files.length / cols);
+            
             canvas.width = width * cols;
             canvas.height = height * rows;
 
@@ -113,28 +126,26 @@
                 ctx.drawImage(img, x, y, width, height);
             }
 
-            // 4. Upload
-            updateProgress("Uploading...", 90);
-            canvas.toBlob(async (blob) => {
-                const fileName = `sprite_${Date.now()}.png`;
+            // 4. Show Result
+            updateProgress("Done!", 100);
+            canvas.toBlob((blob) => {
+                const url = URL.createObjectURL(blob);
                 
-                // Get Upload URL
-                const signRes = await fetch('/api/sign-upload', {
-                    method: 'POST',
-                    body: JSON.stringify({ fileName })
-                });
-                const { url } = await signRes.json();
-
-                // Upload to R2
-                await fetch(url, { method: 'PUT', body: blob });
-
-                updateProgress("Done!", 100);
-                document.getElementById('finalImage').src = URL.createObjectURL(blob);
+                // Set Image
+                document.getElementById('finalImage').src = url;
+                
+                // Set Download Link
+                const dlLink = document.getElementById('downloadLink');
+                dlLink.href = url;
+                
                 document.getElementById('resultSection').classList.remove('hidden');
                 document.getElementById('generateBtn').disabled = false;
                 
-                // Cleanup
-                try { ffmpeg.exit(); } catch(e){}
+                // Cleanup memory
+                try {
+                    ffmpeg.FS('unlink', 'input.mp4');
+                    files.forEach(f => ffmpeg.FS('unlink', f));
+                } catch(e){}
             }, 'image/png');
 
         } catch (err) {

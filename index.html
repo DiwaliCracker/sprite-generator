@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Sprite Generator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+    <style>.loader { transition: width 0.2s; }</style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-4">
+
+    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-2xl">
+        <h1 class="text-3xl font-bold mb-6 text-blue-400">Video Sprite Generator</h1>
+
+        <div class="space-y-4">
+            <div>
+                <label class="block text-sm mb-1">Video URL (Direct MP4 link)</label>
+                <input type="text" id="videoUrl" class="w-full p-2 rounded bg-gray-700 border border-gray-600 focus:border-blue-500 outline-none" placeholder="https://example.com/video.mp4">
+            </div>
+            
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm mb-1">Thumbnail Width</label>
+                    <input type="number" id="thumbWidth" value="160" class="w-full p-2 rounded bg-gray-700 border border-gray-600">
+                </div>
+                <div>
+                    <label class="block text-sm mb-1">Interval (seconds)</label>
+                    <input type="number" id="interval" value="5" class="w-full p-2 rounded bg-gray-700 border border-gray-600">
+                </div>
+            </div>
+
+            <button onclick="processVideo()" id="generateBtn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded transition">
+                Generate Sprite
+            </button>
+        </div>
+
+        <div id="statusSection" class="hidden mt-6">
+            <div class="flex justify-between mb-1">
+                <span id="statusText" class="text-sm text-gray-300">Initializing...</span>
+                <span id="percentage" class="text-sm text-blue-400">0%</span>
+            </div>
+            <div class="w-full bg-gray-700 rounded-full h-4 overflow-hidden">
+                <div id="progressBar" class="loader bg-blue-500 h-full" style="width: 0%"></div>
+            </div>
+        </div>
+
+        <div id="resultSection" class="hidden mt-6 p-4 bg-gray-700 rounded text-center">
+            <h3 class="text-xl font-bold text-green-400 mb-2">Success!</h3>
+            <img id="finalImage" class="max-w-full border-2 border-green-500 rounded mx-auto mb-4" />
+        </div>
+    </div>
+
+<script>
+    const { createFFmpeg, fetchFile } = FFmpeg;
+    const ffmpeg = createFFmpeg({ log: true });
+
+    const statusText = document.getElementById('statusText');
+    const progressBar = document.getElementById('progressBar');
+    const percentage = document.getElementById('percentage');
+
+    function updateProgress(msg, percent) {
+        statusText.innerText = msg;
+        progressBar.style.width = percent + "%";
+        percentage.innerText = percent + "%";
+    }
+
+    async function processVideo() {
+        const videoUrl = document.getElementById('videoUrl').value;
+        const width = parseInt(document.getElementById('thumbWidth').value);
+        const interval = parseInt(document.getElementById('interval').value);
+        const height = Math.round(width * (9/16)); // Auto calc height
+
+        if (!videoUrl) return alert("Please enter a URL");
+
+        document.getElementById('statusSection').classList.remove('hidden');
+        document.getElementById('generateBtn').disabled = true;
+
+        try {
+            if (!ffmpeg.isLoaded()) {
+                updateProgress("Loading Engine...", 10);
+                await ffmpeg.load();
+            }
+
+            // 1. Download Video via our Proxy
+            updateProgress("Downloading Video...", 20);
+            const proxyRes = await fetch(`/api/proxy?url=${encodeURIComponent(videoUrl)}`);
+            if (!proxyRes.ok) throw new Error("Could not fetch video. Check URL.");
+            const videoData = await proxyRes.arrayBuffer();
+            ffmpeg.FS('writeFile', 'input.mp4', new Uint8Array(videoData));
+
+            // 2. Extract Frames
+            updateProgress("Extracting Frames (this takes time)...", 40);
+            // Limit to first 60 seconds for demo speed, remove '-t 60' for full video
+            await ffmpeg.run('-i', 'input.mp4', '-vf', `fps=1/${interval},scale=${width}:-1`, 'frame_%03d.png');
+
+            // 3. Stitch on Canvas
+            updateProgress("Stitching Images...", 80);
+            const files = ffmpeg.FS('readdir', '/').filter(f => f.startsWith('frame') && f.endsWith('.png'));
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const cols = 5;
+            const rows = Math.ceil(files.length / cols);
+            canvas.width = width * cols;
+            canvas.height = height * rows;
+
+            for (let i = 0; i < files.length; i++) {
+                const data = ffmpeg.FS('readFile', files[i]);
+                const blob = new Blob([data.buffer], {type: 'image/png'});
+                const img = await createImageBitmap(blob);
+                const x = (i % cols) * width;
+                const y = Math.floor(i / cols) * height;
+                ctx.drawImage(img, x, y, width, height);
+            }
+
+            // 4. Upload
+            updateProgress("Uploading...", 90);
+            canvas.toBlob(async (blob) => {
+                const fileName = `sprite_${Date.now()}.png`;
+                
+                // Get Upload URL
+                const signRes = await fetch('/api/sign-upload', {
+                    method: 'POST',
+                    body: JSON.stringify({ fileName })
+                });
+                const { url } = await signRes.json();
+
+                // Upload to R2
+                await fetch(url, { method: 'PUT', body: blob });
+
+                updateProgress("Done!", 100);
+                document.getElementById('finalImage').src = URL.createObjectURL(blob);
+                document.getElementById('resultSection').classList.remove('hidden');
+                document.getElementById('generateBtn').disabled = false;
+                
+                // Cleanup
+                try { ffmpeg.exit(); } catch(e){}
+            }, 'image/png');
+
+        } catch (err) {
+            console.error(err);
+            updateProgress("Error: " + err.message, 0);
+            document.getElementById('generateBtn').disabled = false;
+        }
+    }
+</script>
+</body>
+</html>

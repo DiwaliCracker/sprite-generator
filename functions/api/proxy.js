@@ -4,13 +4,19 @@ export async function onRequest(context) {
 
   if (!videoUrl) return new Response('Missing URL', { status: 400 });
 
-  // Fetch the video from the internet
+  // Fetch the video
   const response = await fetch(videoUrl, {
     headers: {
       'User-Agent': 'Cloudflare-Worker'
     }
   });
 
-  // Relay it back to the browser
-  return new Response(response.body, response);
+  // Send it back to your browser with "permissions" allowed
+  const newHeaders = new Headers(response.headers);
+  newHeaders.set('Access-Control-Allow-Origin', '*');
+
+  return new Response(response.body, {
+    status: response.status,
+    headers: newHeaders
+  });
 }

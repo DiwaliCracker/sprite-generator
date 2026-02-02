@@ -73,86 +73,75 @@
     }
   
     async function processVideo() {
-        const videoUrl = document.getElementById('videoUrl').value;
-        const width = parseInt(document.getElementById('thumbWidth').value);
-        const interval = parseInt(document.getElementById('interval').value);
-        // Auto-calculate height assuming 16:9 ratio. You can change this if needed.
-        const height = Math.round(width * (9/16)); 
+    const videoUrl = document.getElementById('videoUrl').value;
+    const width = parseInt(document.getElementById('thumbWidth').value);
+    const interval = parseInt(document.getElementById('interval').value);
+    const height = Math.round(width * (9/16)); 
 
-        if (!videoUrl) return alert("Please enter a URL");
+    if (!videoUrl) return alert("Please enter a URL");
 
-        document.getElementById('statusSection').classList.remove('hidden');
-        document.getElementById('generateBtn').disabled = true;
-        document.getElementById('resultSection').classList.add('hidden');
+    document.getElementById('statusSection').classList.remove('hidden');
+    document.getElementById('generateBtn').disabled = true;
 
-        try {
-            if (!ffmpeg.isLoaded()) {
-                updateProgress("Loading Engine...", 10);
-                await ffmpeg.load();
-            }
-
-            // 1. Download Video via Cloudflare Proxy
-            updateProgress("Downloading Video...", 20);
-            const proxyRes = await fetch(`/api/proxy?url=${encodeURIComponent(videoUrl)}`);
-            if (!proxyRes.ok) throw new Error("Could not fetch video. Link might be broken.");
-            const videoData = await proxyRes.arrayBuffer();
-            ffmpeg.FS('writeFile', 'input.mp4', new Uint8Array(videoData));
-
-            // 2. Extract Frames
-            updateProgress("Extracting Frames (Please wait)...", 40);
-            // Command to extract 1 frame every X seconds, resized to width
-            await ffmpeg.run('-i', 'input.mp4', '-vf', `fps=1/${interval},scale=${width}:-1`, 'frame_%03d.png');
-
-            // 3. Stitch Images
-            updateProgress("Stitching Sprite...", 80);
-            const files = ffmpeg.FS('readdir', '/').filter(f => f.startsWith('frame') && f.endsWith('.png'));
-            
-            if(files.length === 0) throw new Error("No frames could be extracted.");
-
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            const cols = 5; // Number of columns in the grid
-            const rows = Math.ceil(files.length / cols);
-            
-            canvas.width = width * cols;
-            canvas.height = height * rows;
-
-            for (let i = 0; i < files.length; i++) {
-                const data = ffmpeg.FS('readFile', files[i]);
-                const blob = new Blob([data.buffer], {type: 'image/png'});
-                const img = await createImageBitmap(blob);
-                const x = (i % cols) * width;
-                const y = Math.floor(i / cols) * height;
-                ctx.drawImage(img, x, y, width, height);
-            }
-
-            // 4. Show Result
-            updateProgress("Done!", 100);
-            canvas.toBlob((blob) => {
-                const url = URL.createObjectURL(blob);
-                
-                // Set Image
-                document.getElementById('finalImage').src = url;
-                
-                // Set Download Link
-                const dlLink = document.getElementById('downloadLink');
-                dlLink.href = url;
-                
-                document.getElementById('resultSection').classList.remove('hidden');
-                document.getElementById('generateBtn').disabled = false;
-                
-                // Cleanup memory
-                try {
-                    ffmpeg.FS('unlink', 'input.mp4');
-                    files.forEach(f => ffmpeg.FS('unlink', f));
-                } catch(e){}
-            }, 'image/png');
-
-        } catch (err) {
-            console.error(err);
-            updateProgress("Error: " + err.message, 0);
-            document.getElementById('generateBtn').disabled = false;
+    try {
+        if (!ffmpeg.isLoaded()) {
+            updateProgress("Loading Engine...", 10);
+            await ffmpeg.load();
         }
+
+        // --- THE "FAST" CHANGE ---
+        // Instead of downloading the whole file, we tell FFmpeg 
+        // to read it directly from our proxy URL.
+        updateProgress("Connecting to stream...", 20);
+        
+        const proxyUrl = `${window.location.origin}/api/proxy?url=${encodeURIComponent(videoUrl)}`;
+        
+        // We use ffmpeg.run directly on the URL. 
+        // -seekable 1 tells FFmpeg it can jump around the file without downloading it all.
+        updateProgress("Extracting frames via stream (Faster)...", 40);
+        
+        await ffmpeg.run(
+            '-seekable', '1',
+            '-i', proxyUrl, 
+            '-vf', `fps=1/${interval},scale=${width}:-1`, 
+            'frame_%03d.png'
+        );
+
+        // 3. Stitch Images (Same as before)
+        updateProgress("Stitching Sprite...", 80);
+        const files = ffmpeg.FS('readdir', '/').filter(f => f.startsWith('frame') && f.endsWith('.png'));
+        
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const cols = 5;
+        const rows = Math.ceil(files.length / cols);
+        canvas.width = width * cols;
+        canvas.height = height * rows;
+
+        for (let i = 0; i < files.length; i++) {
+            const data = ffmpeg.FS('readFile', files[i]);
+            const blob = new Blob([data.buffer], {type: 'image/png'});
+            const img = await createImageBitmap(blob);
+            const x = (i % cols) * width;
+            const y = Math.floor(i / cols) * height;
+            ctx.drawImage(img, x, y, width, height);
+            ffmpeg.FS('unlink', files[i]); // Free memory immediately
+        }
+
+        updateProgress("Done!", 100);
+        canvas.toBlob((blob) => {
+            const url = URL.createObjectURL(blob);
+            document.getElementById('finalImage').src = url;
+            document.getElementById('downloadLink').href = url;
+            document.getElementById('resultSection').classList.remove('hidden');
+            document.getElementById('generateBtn').disabled = false;
+        }, 'image/png');
+
+    } catch (err) {
+        console.error(err);
+        updateProgress("Error: " + err.message, 0);
+        document.getElementById('generateBtn').disabled = false;
+    }
     }
 </script>
 </body>
